@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import click
+from image_optimization import image_attributes
 from flask import Flask, abort, flash, g, redirect, render_template, request, session, url_for, Response
 from flask_wtf.csrf import CSRFProtect
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -105,7 +106,7 @@ def create_app(test_config=None):
 
     @app.context_processor
     def context():
-        return dict(site=settings(), statuses=STATUSES, today=datetime.now(ZoneInfo('Europe/Sofia')).date().isoformat())
+        return dict(site=settings(), image_attributes=lambda source: image_attributes(app, source), statuses=STATUSES, today=datetime.now(ZoneInfo('Europe/Sofia')).date().isoformat())
 
     @app.after_request
     def headers(response):
@@ -236,17 +237,18 @@ def create_app(test_config=None):
     def save_image(upload):
         if not upload or not upload.filename:
             return None
-        from PIL import Image, UnidentifiedImageError
+        from PIL import Image, ImageOps, UnidentifiedImageError
         try:
             photo = Image.open(upload.stream)
             if photo.format not in ('JPEG', 'PNG', 'WEBP') or photo.width * photo.height > 16_000_000:
                 raise ValueError()
             photo.load()
+            photo = ImageOps.exif_transpose(photo)
             photo.thumbnail((2000, 2000))
             folder = Path(app.instance_path) / 'uploads'
             folder.mkdir(exist_ok=True)
             name = secrets.token_hex(16) + '.webp'
-            photo.convert('RGB').save(folder / name, 'WEBP', quality=86)
+            photo.convert('RGBA' if 'A' in photo.getbands() or 'transparency' in photo.info else 'RGB').save(folder / name, 'WEBP', quality=82, method=6)
             return '/media/' + name
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
             raise ValueError() from exc
@@ -254,7 +256,16 @@ def create_app(test_config=None):
     @app.get('/media/<filename>')
     def media(filename):
         from flask import send_from_directory
-        return send_from_directory(Path(app.instance_path) / 'uploads', filename)
+        return send_from_directory(Path(app.instance_path) / 'uploads', filename, max_age=31536000)
+
+    @app.get('/optimized-images/<filename>')
+    def optimized_image(filename):
+        from flask import send_from_directory
+        if not re.fullmatch(r'[a-f0-9]{24}-(480|768|960|1280|1600|2000|[1-9][0-9]{0,3})\.webp', filename):
+            abort(404)
+        response = send_from_directory(Path(app.instance_path) / 'image-cache', filename, max_age=31536000)
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return response
 
     @app.get('/robots.txt')
     def robots():
